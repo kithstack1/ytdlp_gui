@@ -14,6 +14,8 @@ cli script aimed at ease of use
 import yt_dlp
 import os 
 import tabulate
+import re
+
 
 def clean_up(query):
     """ clean up query """
@@ -28,9 +30,47 @@ def extract_info(query: str,num_results: int) -> list:
       query (str): query to search for
       num_results (int): number of results to return
     """
+
     with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
         results = ydl.extract_info(f"ytsearch{num_results}:{query}", download=False)['entries']
     return results
+
+
+def format_selector(ctx):
+    """ Select the best video and the best audio that won't result in an mkv.
+    NOTE: This is just an example and does not handle all cases """
+
+    # formats are already sorted worst to best
+    formats = ctx.get('formats')[::-1]
+
+    # acodec='none' means there is no audio
+    best_video = next(f for f in formats
+                      if f['vcodec'] != 'none' and f['acodec'] == 'none')
+
+    # find compatible audio extension
+    audio_ext = {'mp4': 'm4a', 'webm': 'webm'}[best_video['ext']]
+    # vcodec='none' means there is no video
+    best_audio = next(f for f in formats if (
+        f['acodec'] != 'none' and f['vcodec'] == 'none' and f['ext'] == audio_ext))
+
+    # These are the minimum required fields for a merged format
+    yield {
+        'format_id': f'{best_video["format_id"]}+{best_audio["format_id"]}',
+        'ext': best_video['ext'],
+        'requested_formats': [best_video, best_audio],
+        # Must be + separated list of protocols
+        'protocol': f'{best_video["protocol"]}+{best_audio["protocol"]}'
+    }
+
+
+
+
+def is_supported(url):
+    extractors = yt_dlp.extractor.gen_extractors()
+    for e in extractors:
+        if e.suitable(url) and e.IE_NAME != 'generic':
+            return (True, e.IE_NAME)
+    return False, None
 
 
 
@@ -39,7 +79,23 @@ def main():
     """ main function """
     print("YOUTUBE-DL BASED DOWNLOADER")
     print("by: github.com/kithstack1")
+    # print in a table format the first 10 extractors available in yt-dlp
+    print('extractors available include but not limited to: ')
+    extractors = yt_dlp.list_extractors()
+    extractor_names = [extractor.IE_NAME for extractor in extractors][:10]
+    headers = ['index', 'extractor']
+    table = [[index, extractor] for index, extractor in enumerate(extractor_names)]
+    print(tabulate.tabulate(table, headers=headers, tablefmt='grid'))
     query = input("Enter the url or search term: ")
+    # query might be a url or a search term so pass it to is_supported to check
+    supported, extractor = is_supported(query)
+    # if the url is supported and it aint from youtube, then just download it with yt_dlp
+    if supported and extractor != 'Youtube':
+        print(f'Detected url from {extractor.upper()}')
+        print('[+] downloading...')
+        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+            ydl.download([query])
+            return 
     query = clean_up(query)
     print('query: ' + query)
     print('Do you want the first result?')
@@ -81,12 +137,15 @@ def main():
 
     # get additional options
     download_best = input("Download best quality? (y/n): ")
+    write_subs = input("Write subtitles? (y/n): ")
+    write_subs = True if write_subs == 'y' else False 
     if download_best == 'y':
        download_best = True
     else:
         download_best = False
+    available_formats = results[choice-1]['formats']
+    format_codes = [format['format_id'] for format in available_formats]
     if not download_best:
-        available_formats = results[choice-1]['formats']
         headers = 'Index Format Extension Resolution note'.split(' ')
         table = []
         for i, format in enumerate(available_formats):
@@ -97,13 +156,9 @@ def main():
         format_code  = available_formats[format_choice-1]['format_id']
         extention = available_formats[format_choice-1]['ext']
         quality = available_formats[format_choice-1]['format_note']
+        ydl_opts = {"format": str(format_code), "outtmpl": f"{output_dir}/{result['title']}.{extention}", "quiet": True, "quality": quality,"extention": extention, "writeautomaticsub": write_subs}
     else:
-        format_code = 22 if media_type == 'video' else 140
-        extention = 'mp4' if media_type == 'video' else 'mp3'
-        quality = 'best'
-    # store options in a dictionary
-    ydl_opts = {"format": str(format_code), "outtmpl": f"{output_dir}/{result['title']}.{extention}", "quiet": True, "quality": quality,"extention": extention}
-    # download video or audio
+        ydl_opts = {'format': format_selector, "outtmpl": f"{output_dir}/{result['title']}.%(ext)s", "quiet": True, "writeautomaticsub": write_subs}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([results[choice-1]['webpage_url']])
     print("Download complete")
